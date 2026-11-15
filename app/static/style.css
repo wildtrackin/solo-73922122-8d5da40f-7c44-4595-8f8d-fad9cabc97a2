@@ -61,3 +61,5 @@ a.dl { color: var(--blue); text-decoration: none; font-weight: 600; }
 a.dl:hover { text-decoration: underline; }
 .rules ul { margin: 6px 0; padding-left: 20px; font-size: 13px; color: #415063; }
 .rules li { margin-bottom: 5px; }
+.card.review { border-color: #e4c07a; background: #fffaf0; }
+.card.review h2 { color: #8a6d1a; }

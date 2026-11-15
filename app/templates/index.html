@@ -22,7 +22,8 @@
 
   <section class="card">
     <h2>1. 上传 CSV（最多 30 行）</h2>
-    <p class="hint">必需列：<code>受试者号,年龄,邮编,病种</code>；年龄为 0～99 整数，邮编为五位数字；受试者号重复将整批拒收。</p>
+    <p class="hint">必需列：<code>受试者号,年龄,邮编,病种</code>；年龄为 0～99 整数，邮编为五位数字；受试者号重复将整批拒收。
+      引号不完整（未闭合）或病种跨行的文件整批拒收——未闭合的引号会把下一条受试者记录吞并进病种字段。</p>
     <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form">
       <input type="file" name="file" accept=".csv,text/csv" required>
       <button type="submit" class="primary">上传并生成匿名预览</button>
@@ -70,6 +71,10 @@
       </tbody>
     </table>
 
+    {% if pending_blocked %}
+    <section class="banner error"><strong>已拦截：</strong>该预览含跨行病种（历史遗留的引号吞并记录，
+      病种中可能混有被吞并的受试者号），不可发布。请重新上传原始 CSV 生成新预览。</section>
+    {% else %}
     <form action="/publish/{{ pending.id }}" method="post" class="publish-form">
       <label class="confirm">
         <input type="checkbox" name="confirm" value="on" required>
@@ -77,6 +82,7 @@
       </label>
       <button type="submit" class="primary">确认发布</button>
     </form>
+    {% endif %}
   </section>
   {% else %}
   <section class="card muted">
@@ -107,6 +113,27 @@
     {% endif %}
   </section>
 
+  {% if review %}
+  <section class="card review">
+    <h2>待核查批次（已停止下载）</h2>
+    <p class="hint">启动核查发现以下历史批次的可下载文件异常（病种含换行或无法解析，
+      已发布文件无法还原原始行边界），已持久标记为待核查并停止下载；原始字节留存供内部核对。</p>
+    <table>
+      <thead><tr><th>批次</th><th>来源文件</th><th>标记时间</th><th>核查原因</th></tr></thead>
+      <tbody>
+      {% for b in review %}
+        <tr>
+          <td class="num">#{{ b.id }}</td>
+          <td>{{ b.source_filename }}</td>
+          <td>{{ b.review_marked_at }}</td>
+          <td>{{ b.review_reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
   <section class="card rules">
     <h2>匿名化规则说明</h2>
     <ul>
@@ -115,6 +142,8 @@
       <li>最多剔除 2 行；保留数据中每个（年龄, 邮编）组合须至少 3 人，且包含至少两种病种。</li>
       <li>在全部可行方案中选择两列隐藏等级之和最小者；同级先少剔除，再优先保留年龄精度。</li>
       <li>再次上传后，旧预览立即失效且不可发布；发布失败不会产生任何可下载残件。</li>
+      <li>引号不完整或病种跨行的上传整批拒收；含跨行病种的历史预览在发布时拦截。</li>
+      <li>每次启动时核查历史已发布文件的实际字节：病种含换行或无法解析的批次持久标记为「待核查」并停止下载，原始字节留存供内部核对。</li>
     </ul>
   </section>
 </main>

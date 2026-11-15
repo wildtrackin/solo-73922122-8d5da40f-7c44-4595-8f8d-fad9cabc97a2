@@ -4,6 +4,8 @@
 --------
 * 最多 30 行数据，列：受试者号、年龄(0~99)、五位邮编、病种。
 * 受试者号重复 -> 整批拒收。
+* 引号不完整（未闭合）或病种跨行 -> 整批拒收：未闭合的引号会把下一条
+  受试者记录吞并进病种字段，预览看似合规，发布文件却含被吞并的受试者号。
 * 发布前移除受试者号；年龄隐藏等级：0 原值 / 1 十岁段 / 2 隐藏；
   邮编隐藏等级：0 原值 / 1 前三位 / 2 隐藏。
 * 最多剔除 2 行；保留数据中每个 (年龄, 邮编) 组合至少 3 人且含至少 2 种病种。
@@ -49,6 +51,11 @@ class ValidationError(Exception):
     """CSV 结构或字段校验失败（整批拒收）。"""
 
 
+def has_linebreak(value: str) -> bool:
+    """字段值是否跨行（含 CR/LF）。"""
+    return "\n" in value or "\r" in value
+
+
 @dataclass(frozen=True)
 class Row:
     subject_id: str
@@ -75,8 +82,14 @@ def parse_csv(data: bytes) -> list[Row]:
         raise ValidationError("上传文件为空")
 
     text = decode_bytes(data)
-    reader = csv.reader(io.StringIO(text))
-    raw_lines = [line for line in reader if any(cell.strip() for cell in line)]
+    # strict=True：引号未闭合（吞并后续记录直至文件结尾）时抛出 csv.Error，
+    # 而不是静默生成看似合规、实则缺行的数据。
+    try:
+        reader = csv.reader(io.StringIO(text), strict=True)
+        raw_lines = [line for line in reader if any(cell.strip() for cell in line)]
+    except csv.Error as exc:
+        raise ValidationError(
+            f"CSV 引号不完整或格式错误（{exc}），整批拒收") from None
     if not raw_lines:
         raise ValidationError("CSV 文件内容为空")
 
@@ -101,6 +114,16 @@ def parse_csv(data: bytes) -> list[Row]:
     rows: list[Row] = []
     seen_ids: set[str] = set()
     for line_no, raw in enumerate(data_lines, start=2):
+        # 跨行字段检测：引号在某条记录内未闭合、到后续记录才闭合时，
+        # 被吞并的内容（含受试者号）会作为字段内的换行残留下来。
+        broken = [idx for idx, c in enumerate(raw) if has_linebreak(c)]
+        if broken:
+            if col_index[DISEASE] in broken:
+                raise ValidationError(
+                    f"第 {line_no} 行病种跨行（病种字段含换行，"
+                    "疑似引号吞并了下一条受试者记录），整批拒收")
+            raise ValidationError(
+                f"第 {line_no} 行存在跨行字段（引号未正确闭合），整批拒收")
         if len(raw) < len(col_index):
             raw = raw + [""] * (len(col_index) - len(raw))
 
@@ -179,6 +202,9 @@ def verify_output(output_rows: list[dict[str, str]]) -> bool:
     """发布前对已匿名化结果再次独立校验（纵深防御）。"""
     groups: dict[tuple[str, str], list[str]] = {}
     for r in output_rows:
+        # 跨行字段（引号吞并记录的特征）一律视为不合规
+        if any(has_linebreak(str(r.get(h, ""))) for h in OUTPUT_HEADERS):
+            return False
         key = (r[AGE], r[ZIP])
         groups.setdefault(key, []).append(r[DISEASE])
     if not groups:
@@ -189,6 +215,19 @@ def verify_output(output_rows: list[dict[str, str]]) -> bool:
         if len(set(diseases)) < MIN_DISEASE_KINDS:
             return False
     return True
+
+
+def find_linebreak_rows(output_rows: list[dict[str, str]]) -> list[int]:
+    """返回匿名结果中含跨行字段的行号（1 起）；空列表表示无此类数据。
+
+    用于发布时拦截修复前生成的旧待确认预览：其中的病种可能吞并了
+    下一条受试者记录（含受试者号），不得进入可下载文件。
+    """
+    bad: list[int] = []
+    for i, r in enumerate(output_rows, start=1):
+        if any(has_linebreak(str(r.get(h, ""))) for h in OUTPUT_HEADERS):
+            bad.append(i)
+    return bad
 
 
 # --------------------------------------------------------------------------
@@ -260,12 +299,59 @@ def find_best_plan(rows: list[Row]) -> Optional[dict]:
 
 def render_output_csv(output_rows: list[dict[str, str]]) -> bytes:
     """将匿名结果渲染为 CSV 字节（UTF-8 BOM，便于 Excel 打开）。"""
+    for r in output_rows:
+        for h in OUTPUT_HEADERS:
+            if has_linebreak(str(r.get(h, ""))):
+                raise ValueError("匿名结果含跨行字段，拒绝渲染输出文件")
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=list(OUTPUT_HEADERS))
     writer.writeheader()
     for r in output_rows:
         writer.writerow({h: r[h] for h in OUTPUT_HEADERS})
     return buf.getvalue().encode("utf-8-sig")
+
+
+def inspect_downloadable_csv(data: object) -> Optional[str]:
+    """启动核查：检查已发布批次的实际可下载字节。
+
+    返回 None 表示文件结构安全；否则返回问题原因（用于持久标记“待核查”）。
+    已发布文件无法还原原始行边界：只要病种字段含换行（引号吞并记录的
+    特征）或文件无法解析，即视为可疑，不得误判为安全。
+    """
+    if isinstance(data, memoryview):
+        data = data.tobytes()
+    if isinstance(data, bytes):
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return "文件编码无法识别，无法解析"
+    elif isinstance(data, str):
+        text = data
+    else:
+        return "可下载文件缺失"
+    if not text.strip():
+        return "可下载文件为空，无法解析"
+
+    try:
+        records = list(csv.reader(io.StringIO(text), strict=True))
+    except csv.Error:
+        return "CSV 引号不完整，无法解析"
+    records = [r for r in records if any(c.strip() for c in r)]
+    if not records:
+        return "可下载文件为空，无法解析"
+
+    header = [h.strip().lstrip("﻿") for h in records[0]]
+    if header != list(OUTPUT_HEADERS):
+        return "文件表头结构异常，无法解析"
+
+    for rec in records[1:]:
+        if len(rec) != len(OUTPUT_HEADERS):
+            return "数据行列数异常，无法解析"
+        if any(has_linebreak(c) for c in rec[:2]):
+            return "字段含换行，无法还原原始行边界"
+        if has_linebreak(rec[2]):
+            return "病种字段含换行（疑似引号吞并记录），无法还原原始行边界"
+    return None
 
 
 def plan_to_json(plan: dict) -> str:
