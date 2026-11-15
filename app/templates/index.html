@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>临床数据匿名化发布平台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>临床数据匿名化发布平台</h1>
+  <p class="subtitle">小群体消除 · k-匿名（每组 ≥ 3 人且 ≥ 2 种病种）· 发布前移除受试者号</p>
+</header>
+
+<main>
+  {% if error %}
+  <section class="banner error"><strong>操作未完成：</strong>{{ error }}</section>
+  {% endif %}
+  {% if info %}
+  <section class="banner info">{{ info }}</section>
+  {% endif %}
+
+  <section class="card">
+    <h2>1. 上传 CSV（最多 30 行）</h2>
+    <p class="hint">必需列：<code>受试者号,年龄,邮编,病种</code>；年龄为 0～99 整数，邮编为五位数字；受试者号重复将整批拒收。</p>
+    <form action="/upload" method="post" enctype="multipart/form-data" class="upload-form">
+      <input type="file" name="file" accept=".csv,text/csv" required>
+      <button type="submit" class="primary">上传并生成匿名预览</button>
+    </form>
+  </section>
+
+  {% if pending and pending_plan %}
+  <section class="card preview" id="preview">
+    <h2>2. 匿名预览（批次 #{{ pending.id }}）</h2>
+    <p class="hint">来源文件：{{ pending.source_filename }} ｜ 原始 {{ pending.row_count }} 行，
+      剔除 {{ pending_plan.removed_count }} 行，保留 {{ pending_plan.output_rows|length }} 行</p>
+
+    <div class="scheme">
+      <span class="tag">年龄：{{ pending_plan.age_label }}（等级 {{ pending_plan.age_level }}）</span>
+      <span class="tag">邮编：{{ pending_plan.zip_label }}（等级 {{ pending_plan.zip_level }}）</span>
+      <span class="tag">隐藏等级之和：{{ pending_plan.level_sum }}</span>
+    </div>
+
+    {% if pending_plan.removed_ids %}
+    <p class="removed">已剔除受试者号：{{ pending_plan.removed_ids | join("、") }}</p>
+    {% endif %}
+
+    <h3>分组校验（每个年龄 × 邮编组合）</h3>
+    <table>
+      <thead><tr><th>年龄</th><th>邮编</th><th>人数</th><th>病种数</th><th>所含病种</th></tr></thead>
+      <tbody>
+      {% for g in pending_plan.groups %}
+        <tr>
+          <td>{{ g.age }}</td><td>{{ g.zip }}</td>
+          <td class="num">{{ g.count }}</td>
+          <td class="num">{{ g.diseases|length }}</td>
+          <td>{{ g.diseases|join("、") }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <h3>匿名数据（已移除受试者号）</h3>
+    <table>
+      <thead><tr><th>#</th><th>年龄</th><th>邮编</th><th>病种</th></tr></thead>
+      <tbody>
+      {% for r in pending_plan.output_rows %}
+        <tr><td class="num">{{ loop.index }}</td><td>{{ r.年龄 }}</td><td>{{ r.邮编 }}</td><td>{{ r.病种 }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <form action="/publish/{{ pending.id }}" method="post" class="publish-form">
+      <label class="confirm">
+        <input type="checkbox" name="confirm" value="on" required>
+        我已核对预览内容，确认发布匿名 CSV（发布后可在下方下载）
+      </label>
+      <button type="submit" class="primary">确认发布</button>
+    </form>
+  </section>
+  {% else %}
+  <section class="card muted">
+    <h2>2. 匿名预览</h2>
+    <p>当前没有待确认的预览。请先上传 CSV；若不存在可行方案，系统会明确提示且不能发布。</p>
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <h2>3. 已发布的匿名文件</h2>
+    {% if published %}
+    <table>
+      <thead><tr><th>批次</th><th>来源文件</th><th>发布时间</th><th>行数</th><th>下载</th></tr></thead>
+      <tbody>
+      {% for b in published %}
+        <tr>
+          <td class="num">#{{ b.id }}</td>
+          <td>{{ b.source_filename }}</td>
+          <td>{{ b.created_at }}</td>
+          <td class="num">{{ b.row_count }}</td>
+          <td><a class="dl" href="/download/{{ b.id }}">{{ b.output_filename }}</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="hint">尚无已发布文件。</p>
+    {% endif %}
+  </section>
+
+  <section class="card rules">
+    <h2>匿名化规则说明</h2>
+    <ul>
+      <li>年龄隐藏等级：0 = 原值；1 = 十岁段（如 42 → 40-49）；2 = 隐藏（***）。</li>
+      <li>邮编隐藏等级：0 = 五位原值；1 = 仅保留前三位（如 100081 → 100**）；2 = 隐藏（***）。</li>
+      <li>最多剔除 2 行；保留数据中每个（年龄, 邮编）组合须至少 3 人，且包含至少两种病种。</li>
+      <li>在全部可行方案中选择两列隐藏等级之和最小者；同级先少剔除，再优先保留年龄精度。</li>
+      <li>再次上传后，旧预览立即失效且不可发布；发布失败不会产生任何可下载残件。</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>
